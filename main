@@ -1,0 +1,169 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import stats
+
+def get_user_stability_data():
+    print("--- Stability Data Input ---")
+    
+    while True:
+        try:
+            num_points = int(input("Enter the total number of timepoints: "))
+            if num_points < 4:
+                print("Please enter at least 4 timepoints to perform meaningful outlier detection.")
+                continue
+            break
+        except ValueError:
+            print("Invalid input. Please enter a whole number.")
+
+    months = []
+    assays = []
+
+    print("\nEnter the data for each timepoint:")
+    for i in range(num_points):
+        while True:
+            try:
+                month = float(input(f"  Timepoint {i+1} - Month: "))
+                assay = float(input(f"  Timepoint {i+1} - Assay (%): "))
+                months.append(month)
+                assays.append(assay)
+                break
+            except ValueError:
+                print("  Invalid input. Please enter numeric values (e.g., 3, 99.5).")
+                
+    df = pd.DataFrame({
+        'Time_Months': months,
+        'Assay_Percent': assays
+    })
+    
+    return df
+
+def analyze_stability_trend_and_oot(df, time_col='Time_Months', assay_col='Assay_Percent', lower_spec=90.0):
+    x = df[time_col].values
+    y = df[assay_col].values
+    n = len(x)
+    
+    if len(np.unique(x)) == 1:
+        print("\nError: All timepoints are identical. Cannot perform linear regression.")
+        return None, None
+
+    Perform Linear Regression
+    slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+    
+    Residuals and Standard Error (Sy.x)
+    y_pred = intercept + slope * x
+    residuals = y - y_pred
+    x_mean = np.mean(x)
+    Sxx = np.sum((x - x_mean)**2)
+    Syx = np.sqrt(np.sum(residuals**2) / (n - 2))
+    
+    OOT / Outlier Detection (Standardized Residuals)
+    Calculate leverage (h) for each point
+    h = (1/n) + ((x - x_mean)**2 / Sxx)
+    
+    Standardized residuals: residual / (Syx * sqrt(1 - h))
+    std_residuals = residuals / (Syx * np.sqrt(1 - h))
+    
+    Flag points with absolute standardized residual > 2.0 (Approx 95% limits)
+    oot_threshold = 2.0
+    is_oot = np.abs(std_residuals) > oot_threshold
+    df['Predicted_Assay'] = y_pred
+    df['Residual'] = residuals
+    df['Std_Residual'] = std_residuals
+    df['Is_OOT'] = is_oot
+    
+    Generate Line Data for Plotting (Extrapolate to max time + 24)
+    max_time = max(x) + 24
+    x_line = np.linspace(0, max_time, 100)
+    y_line = intercept + slope * x_line
+    
+    Calculate the t-statistic for 95% confidence (two-sided for PI, one-sided for LCB)
+    t_val_conf = stats.t.ppf(0.95, df=n-2) # One-sided for shelf life LCB
+    t_val_pred = stats.t.ppf(0.975, df=n-2) # Two-sided for outlier prediction band
+    
+    95% Lower Confidence Bound (for Shelf Life calculation per ICH Q1E)
+    margin_conf = t_val_conf * Syx * np.sqrt((1/n) + ((x_line - x_mean)**2 / Sxx))
+    lower_confidence_bound = y_line - margin_conf
+    
+    95% Prediction Intervals (for visualizing normal data spread vs outliers)
+    margin_pred = t_val_pred * Syx * np.sqrt(1 + (1/n) + ((x_line - x_mean)**2 / Sxx))
+    upper_prediction_bound = y_line + margin_pred
+    lower_prediction_bound = y_line - margin_pred
+    
+    Find Intersection with Specification Limit
+    shelf_life = None
+    for i in range(len(x_line)):
+        if lower_confidence_bound[i] <= lower_spec:
+            shelf_life = x_line[i]
+            break
+            
+    Plotting the Results
+    plt.figure(figsize=(12, 7))
+    
+    Plot normal data
+    plt.scatter(x[~is_oot], y[~is_oot], color='blue', label='Valid Data Points', zorder=5)
+    
+    Plot OOT data points
+    if np.any(is_oot):
+        plt.scatter(x[is_oot], y[is_oot], color='red', marker='X', s=100, label='OOT / Outlier', zorder=6)
+    
+    Regression Line & Confidence Bound
+    plt.plot(x_line, y_line, color='black', label=f'Regression Line (R² = {r_value**2:.4f})')
+    plt.plot(x_line, lower_confidence_bound, color='green', linestyle='--', label='95% Lower Confidence Bound (Shelf Life)')
+    
+    Prediction Band
+    plt.fill_between(x_line, lower_prediction_bound, upper_prediction_bound, color='gray', alpha=0.2, label='95% Prediction Interval (OOT Limit)')
+    
+    Specification Limit
+    plt.axhline(y=lower_spec, color='orange', linestyle='-', label=f'Lower Specification Limit ({lower_spec}%)')
+    
+    Highlight Shelf Life intersection
+    if shelf_life:
+        plt.axvline(x=shelf_life, color='green', linestyle=':', label=f'Projected Shelf Life: {shelf_life:.1f} Months')
+        plt.plot(shelf_life, lower_spec, marker='o', markersize=8, color='green', zorder=7)
+        
+    Formatting
+    plt.title('ICH Q1E Trend Analysis with OOT/Outlier Detection', fontsize=14)
+    plt.xlabel('Time (Months)', fontsize=12)
+    plt.ylabel('Assay (%)', fontsize=12)
+    plt.xlim(0, max_time)
+    
+    y_min = min(85, min(y) - 2)
+    y_max = max(105, max(y) + 2)
+    plt.ylim(y_min, y_max)
+    
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='lower left', fontsize=9)
+    plt.tight_layout()
+    plt.show()
+    
+    return shelf_life, df
+
+if __name__ == "__main__":
+    user_data = get_user_stability_data()
+    
+    while True:
+        try:
+            spec_limit = float(input("\nEnter the Lower Specification Limit (e.g., 90.0): "))
+            break
+        except ValueError:
+            print("Invalid input. Please enter a numeric value.")
+
+    print("\nRunning ICH Q1E evaluation and OOT outlier detection...")
+    estimated_shelf_life, results_df = analyze_stability_trend_and_oot(user_data, lower_spec=spec_limit)
+    
+    print("\n--- Detailed Results & OOT Report ---")
+    Formatting the DataFrame output for cleaner viewing
+    pd.set_option('display.float_format', '{:.3f}'.format)
+    print(results_df[['Time_Months', 'Assay_Percent', 'Predicted_Assay', 'Std_Residual', 'Is_OOT']])
+    
+    if np.any(results_df['Is_OOT']):
+        print("\nWARNING: Out of Trend (OOT) results detected! Review points marked 'True' in the Is_OOT column.")
+        print("These points fall outside the expected 95% Prediction Interval based on standardized residuals.")
+    else:
+        print("\nAll data points conform to the expected trend. No statistical outliers detected.")
+        
+    if estimated_shelf_life:
+        print(f"\nSUCCESS: Based on the 95% LCB, the projected shelf life is {estimated_shelf_life:.1f} months.")
+    else:
+        print(f"\nThe product remains within specifications beyond the evaluated timeframe.")
